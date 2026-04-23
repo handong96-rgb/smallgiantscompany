@@ -56,14 +56,22 @@ CATEGORIES = {
 # 유틸리티
 # ─────────────────────────────────────────────
 
-def get_csrf_token(session: requests.Session) -> str:
-    """메인 페이지에서 실시간 CSRF 토큰 발급"""
-    res = session.get(MAIN_URL, verify=False, timeout=30)
-    soup = BeautifulSoup(res.text, "html.parser")
+def extract_csrf_from_html(html: str) -> str:
+    """이미 로드된 HTML에서 CSRF 토큰 추출 (별도 HTTP 요청 없음)"""
+    soup = BeautifulSoup(html, "html.parser")
     meta = soup.find("meta", {"name": "_csrf"})
     if not meta:
         raise ValueError("CSRF 토큰을 찾을 수 없습니다. 사이트 구조가 변경되었을 수 있습니다.")
     return meta["content"]
+
+
+def refresh_csrf_via_session(session: requests.Session) -> str:
+    """
+    장시간 수집 중 CSRF 토큰 갱신용.
+    이미 세션에 Selenium 쿠키가 이식되어 있으므로 GET 요청이 정상 작동합니다.
+    """
+    res = session.get(MAIN_URL, verify=False, timeout=30)
+    return extract_csrf_from_html(res.text)
 
 
 def post_with_retry(
@@ -116,8 +124,13 @@ def get_completed_ind1_names() -> set:
 # 1단계: Selenium으로 업종 트리 추출
 # ─────────────────────────────────────────────
 
-def get_industry_mapping() -> dict:
-    """웹페이지 JS 함수 실행으로 1차/2차 업종 카테고리 구조 추출"""
+def get_industry_mapping():
+    """
+    웹페이지 JS 함수 실행으로 1차/2차 업종 카테고리 구조 추출.
+    Selenium 쿠키와 CSRF 토큰도 함께 반환해 requests 세션에 이식합니다.
+    -> 별도 GET 요청 없이 수집 시작 가능 (타임아웃 방지 핵심)
+    Returns: (mapping: dict, selenium_cookies: list, csrf_token: str)
+    """
     print("🤖 1단계: 웹 브라우저로 1차/2차 업종 카테고리 구조를 파악합니다...")
 
     options = webdriver.ChromeOptions()
@@ -139,6 +152,8 @@ def get_industry_mapping() -> dict:
 
     driver = webdriver.Chrome(options=options)
     mapping = {}
+    selenium_cookies = []
+    csrf_token = ""
 
     try:
         driver.get(MAIN_URL)
@@ -149,6 +164,12 @@ def get_industry_mapping() -> dict:
             driver.switch_to.alert.accept()
         except Exception:
             pass
+
+        # ── 핵심: 페이지 로드 직후 쿠키와 CSRF 토큰 추출 ──
+        # requests 세션에 이식하면 별도 GET 요청 없이 수집 가능
+        selenium_cookies = driver.get_cookies()
+        csrf_token = extract_csrf_from_html(driver.page_source)
+        print(f"🔑 Selenium에서 쿠키 {len(selenium_cookies)}개 및 CSRF 토큰 추출 완료")
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
         ind1_items = []
@@ -181,7 +202,7 @@ def get_industry_mapping() -> dict:
     finally:
         driver.quit()
 
-    return mapping
+    return mapping, selenium_cookies, csrf_token
 
 
 # ─────────────────────────────────────────────
@@ -189,9 +210,12 @@ def get_industry_mapping() -> dict:
 # ─────────────────────────────────────────────
 
 def scrape_worknet_optimized():
-    industry_mapping = get_industry_mapping()
+    industry_mapping, selenium_cookies, csrf_token = get_industry_mapping()
     if not industry_mapping:
         print("업종 구조를 가져오지 못해 종료합니다.")
+        return
+    if not csrf_token:
+        print("CSRF 토큰을 가져오지 못해 종료합니다.")
         return
 
     # 이미 완료된 1차 업종은 건너뜀 (Resume 기능)
@@ -202,8 +226,11 @@ def scrape_worknet_optimized():
     session = requests.Session()
     session.verify = False
 
-    csrf_token = get_csrf_token(session)
-    print("🔑 CSRF 토큰 발급 완료")
+    # ── 핵심: Selenium 쿠키를 requests 세션에 이식 ──
+    # 동일한 서버 세션을 공유하므로 별도 GET 요청 없이 즉시 POST 가능
+    for cookie in selenium_cookies:
+        session.cookies.set(cookie["name"], cookie["value"], domain=cookie.get("domain", ""))
+    print(f"🍪 Selenium 쿠키 {len(selenium_cookies)}개를 requests 세션에 이식 완료")
     print("🚀 2단계: 순차 수집을 시작합니다.\n")
 
     total_saved = 0  # 누적 저장 건수 (메모리 사용량 최소화)
@@ -214,9 +241,10 @@ def scrape_worknet_optimized():
         for idx, (ind1_code, ind1_info) in enumerate(industry_mapping.items()):
 
             # ── CSRF 토큰 주기적 갱신 (장시간 수집 세션 만료 방지) ──
+            # 쿠키가 이식된 세션이므로 GET 요청이 정상 작동합니다
             if idx > 0 and idx % CSRF_REFRESH_INTERVAL == 0:
                 try:
-                    csrf_token = get_csrf_token(session)
+                    csrf_token = refresh_csrf_via_session(session)
                     print(f"   🔄 CSRF 토큰 갱신 완료 (idx={idx})")
                 except Exception as e:
                     print(f"   ⚠️  CSRF 토큰 갱신 실패, 기존 토큰 유지: {e}")

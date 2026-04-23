@@ -45,14 +45,18 @@ jobs:
     - name: 강소기업 크롤링 스크립트 실행
       if: steps.date_check.outputs.should_run == 'true'
       run: |
-        python 워크넷_강소기업_확장크롤러.py
+        echo "현재 저장소에 있는 파일 목록을 확인합니다:"
+        ls -la
+        echo "파이썬 스크립트를 찾아 실행합니다..."
+        # 파일 이름에 띄어쓰기가 있으므로 반드시 따옴표("")로 묶어주어야 합니다.
+        python "work.go.kr 강소기업 추출20260423.py"
 
     - name: 추출된 결과물(CSV)을 다운로드용 Artifact로 저장
       if: steps.date_check.outputs.should_run == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: worknet_data_csv
-        path: 워크넷_강소기업_완성본.csv
+        path: "*.csv"
 
     - name: 변경된 CSV 파일을 Github 저장소에 자동 커밋 (업데이트)
       if: steps.date_check.outputs.should_run == 'true'

@@ -1,0 +1,62 @@
+name: 매월 워크넷 강소기업 수집
+
+on:
+  schedule:
+    # 매일 UTC 16:00 (한국시간 다음날 새벽 01:00)에 봇을 깨웁니다.
+    - cron: '0 16 * * *'
+  workflow_dispatch: # 수동으로 즉시 실행할 수 있는 버튼 활성화
+
+jobs:
+  scrape-and-save:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 오늘이 한국시간 1일인지 검사
+      id: date_check
+      run: |
+        # 현재 시간을 한국 시간(Asia/Seoul)으로 설정하고 일(Day)을 가져옵니다.
+        KST_DAY=$(TZ='Asia/Seoul' date +'%d')
+        EVENT_NAME="${{ github.event_name }}"
+        
+        # 오늘이 1일이거나, 사용자가 수동으로 버튼을 눌러 실행(workflow_dispatch)한 경우
+        if [ "$KST_DAY" == "01" ] || [ "$EVENT_NAME" == "workflow_dispatch" ]; then
+          echo "should_run=true" >> $GITHUB_OUTPUT
+        else
+          echo "should_run=false" >> $GITHUB_OUTPUT
+          echo "오늘은 한국시간 1일이 아니므로 수집을 건너뜁니다."
+        fi
+
+    - name: 저장소 코드 불러오기
+      if: steps.date_check.outputs.should_run == 'true'
+      uses: actions/checkout@v4
+
+    - name: 파이썬(Python) 환경 설정
+      if: steps.date_check.outputs.should_run == 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: 필요한 파이썬 라이브러리 설치
+      if: steps.date_check.outputs.should_run == 'true'
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests beautifulsoup4 pandas selenium
+
+    - name: 강소기업 크롤링 스크립트 실행
+      if: steps.date_check.outputs.should_run == 'true'
+      run: |
+        python 워크넷_강소기업_확장크롤러.py
+
+    - name: 추출된 결과물(CSV)을 다운로드용 Artifact로 저장
+      if: steps.date_check.outputs.should_run == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: worknet_data_csv
+        path: 워크넷_강소기업_완성본.csv
+
+    - name: 변경된 CSV 파일을 Github 저장소에 자동 커밋 (업데이트)
+      if: steps.date_check.outputs.should_run == 'true'
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "데이터 갱신: 매월 1일 워크넷 강소기업 자동 수집"
+        file_pattern: "*.csv"
